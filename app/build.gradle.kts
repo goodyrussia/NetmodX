@@ -1,0 +1,174 @@
+@file:Suppress("UnstableApiUsage")
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+}
+
+val generatedSrcDir: Provider<Directory> = layout.buildDirectory.dir("generated/projectInfo")
+val generatedXrayCoreJniLibsDir: Provider<Directory> = layout.buildDirectory.dir("generated/xrayCoreJniLibs")
+
+android {
+    namespace = "app"
+    compileSdk = ProjectConfig.TARGET_SDK
+
+    defaultConfig {
+        applicationId = ProjectConfig.PACKAGE_NAME
+        minSdk = ProjectConfig.MIN_SDK
+        targetSdk = ProjectConfig.TARGET_SDK
+        versionCode = ProjectConfig.VERSION_CODE
+        versionName = ProjectConfig.VERSION_NAME
+    }
+
+    androidResources {
+        localeFilters += listOf("en", "zh-rCN")
+    }
+
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*ProjectConfig.SUPPORTED_ANDROID_ABIS.toTypedArray())
+            isUniversalApk = false
+        }
+    }
+
+    signingConfigs {
+        val keystorePath = System.getenv("NETMODX_SIGNING_KEYSTORE")
+        if (!keystorePath.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("NETMODX_SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("NETMODX_SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("NETMODX_SIGNING_KEY_PASSWORD")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
+
+        release {
+            signingConfig = signingConfigs.findByName("release")
+            isDebuggable = false
+            isJniDebuggable = false
+            isPseudoLocalesEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "META-INF/*.kotlin_module",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.md",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.md",
+                "META-INF/NOTICE.txt",
+                "META-INF/versions/**",
+            )
+        }
+    }
+
+    lint {
+        disable += setOf(
+            "ChromeOsAbiSupport",
+            "IconLauncherShape",
+        )
+    }
+}
+
+dependencies {
+    implementation(libs.compose.ui)
+    implementation(libs.compose.foundation)
+    implementation(libs.androidx.navigation3.runtime)
+    implementation(libs.androidx.navigationevent)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.coil)
+    implementation(libs.coil.compose)
+    implementation(project(":setuidgid"))
+    implementation(libs.ktor.http)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.libsu.core)
+    implementation(libs.miuix.ui)
+    implementation(libs.miuix.icons)
+    implementation(libs.miuix.navigation3.ui)
+    implementation(libs.miuix.preference)
+    implementation(libs.reorderable)
+    implementation(libs.snakeyaml.engine)
+    implementation(libs.zxing.android.embedded)
+    ksp(libs.androidx.room.compiler)
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+val generateProjectInfo by tasks.registering(GenerateProjectInfoTask::class) {
+    description = "Generate ProjectInfo object for the app"
+    packageName.set("app")
+    projectName.set(ProjectConfig.PROJECT_NAME)
+    versionName.set(ProjectConfig.VERSION_NAME)
+    versionCode.set(ProjectConfig.VERSION_CODE)
+    xrayCoreVersion.set(ProjectConfig.XRAY_CORE_VERSION)
+    outputDirectory.set(generatedSrcDir.map { it.dir("kotlin") })
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.kotlin?.addGeneratedSourceDirectory(generateProjectInfo) { task ->
+            task.outputDirectory
+        }
+        variant.sources.jniLibs?.addStaticSourceDirectory("build/generated/xrayCoreJniLibs")
+    }
+}
+
+tasks.matching { it.name.startsWith("ksp") }.configureEach {
+    dependsOn(generateProjectInfo)
+}
+
+val aboutLibrariesJsonFile = layout.projectDirectory.file("src/main/assets/aboutlibraries.json")
+
+val updateAboutLibrariesJson = tasks.register<GenerateAboutLibrariesJsonTask>("updateAboutLibrariesJson") {
+    group = "documentation"
+    description = "Update files/aboutlibraries.json from current app dependency metadata."
+    outputFile.set(aboutLibrariesJsonFile)
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    mustRunAfter(updateAboutLibrariesJson)
+    if (!aboutLibrariesJsonFile.asFile.exists()) {
+        dependsOn(updateAboutLibrariesJson)
+    }
+}

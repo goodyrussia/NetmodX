@@ -1,0 +1,20 @@
+// Copyright 2026, AsteriskNG contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package features.proxy.server.model
+
+internal fun ProxyServer<*>.serverHost(): String {
+    return when (this) {
+        is Shadowsocks -> server
+        is Socks -> server
+        is Trojan -> server
+        is VLESS -> server
+        is VMess -> server
+        is Ssh -> server
+        else -> ""
+    }
+}
+
+internal fun String.normalizedServerHost(): String {
+    return trim().trim('[', ']')
+}

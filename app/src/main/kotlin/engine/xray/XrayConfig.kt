@@ -1,0 +1,75 @@
+// Copyright 2026, AsteriskNG contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package engine.xray
+
+import app.AppState
+import app.ProxyServerState
+import features.logs.AndroidAppLogger
+import features.proxy.server.model.ProxyServer
+import kotlinx.serialization.json.JsonObject
+
+internal data class XrayConfigRequest(
+    val appState: AppState,
+    val selectedServer: ProxyServerState,
+    val inbounds: List<JsonObject>,
+    val coreLogPaths: XrayCoreLogPaths,
+    val proxyDnsServers: List<String> = appState.proxyDns,
+    val directDnsServers: List<String> = appState.directDns,
+    val directDnsDomains: List<String> = appState.directDnsDomains,
+    val dnsHosts: List<String> = appState.dnsHosts,
+    val dnsHijackInboundTags: List<String> = emptyList(),
+    val deviceDnsServers: List<String> = emptyList(),
+)
+
+internal data class XrayProxyOutboundServer(
+    val tag: String,
+    val server: ProxyServer<*>,
+    val dialerProxyTag: String? = null,
+    val allowFragment: Boolean = true,
+)
+
+internal object XrayConfigFactory {
+    fun buildXrayConfig(request: XrayConfigRequest): String {
+        val config = buildGeneratedXrayConfig(request).toJsonObject()
+        logGeneratedXrayConfig(config)
+        return XrayConfigJson.encodeToString(config)
+    }
+}
+
+
+private fun buildGeneratedXrayConfig(request: XrayConfigRequest): GeneratedXrayConfig {
+    val outboundPlan = request.appState.buildXrayOutboundPlan(request.selectedServer)
+    val startupProxyServerDomains = outboundPlan.proxyOutbounds.startupProxyServerDnsDomains()
+    val dnsPlan = request.buildXrayDnsPlan(startupProxyServerDomains)
+    val routingPlan = buildXrayRoutingPlan(
+        proxyTarget = outboundPlan.routeTargets.getValue(XrayTags.PROXY),
+        balancers = buildXrayBalancers(outboundPlan.balancers),
+        dnsHijackInboundTags = request.dnsHijackInboundTags,
+        routeProxyDns = dnsPlan.routeProxyDns,
+        routeDirectDns = dnsPlan.routeDirectDns,
+    )
+
+    return GeneratedXrayConfig(
+        log = request.buildXrayLogConfig(),
+        dns = buildXrayDnsConfig(dnsPlan),
+        inbounds = request.inbounds.toJsonObjectArray(),
+        outbounds = buildXrayOutbounds(request.appState, outboundPlan.proxyOutbounds),
+        routing = buildXrayRouting(routingPlan),
+        fakeDns = dnsPlan.fakeDns,
+        observatory = buildXrayObservatory(outboundPlan.observatorySelectors),
+        burstObservatory = buildXrayBurstObservatory(outboundPlan.burstObservatorySelectors),
+    )
+}
+
+private fun logGeneratedXrayConfig(config: JsonObject) {
+    val json = XrayConfigPrettyJson.encodeToString(config)
+    val chunks = json.chunked(LogChunkSize)
+    chunks.forEachIndexed { index, chunk ->
+        val progress = if (chunks.size == 1) "" else " (${index + 1}/${chunks.size})"
+        AndroidAppLogger.info(LogTag, "Generated Xray config JSON$progress:\n$chunk")
+    }
+}
+
+private const val LogTag = "XrayConfig"
+private const val LogChunkSize = 3500

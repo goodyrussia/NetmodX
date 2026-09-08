@@ -1,0 +1,40 @@
+// Copyright 2026, AsteriskNG contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package features.proxy.server.list
+
+internal enum class ProxyServerListAddAction {
+    ScanQrCode,
+    Clipboard,
+    File,
+    VMess,
+    VLESS,
+    Trojan,
+    Shadowsocks,
+    Socks,
+}
+
+internal enum class ProxyServerListToolAction {
+    RestartService,
+    TestLatency,
+    SortByTestResult,
+
+    CopyAllUrls,
+    DeleteDuplicateServers,
+}
+
+internal data class ProxyServerListMenuEntry(
+    val title: String,
+    val action: ProxyServerListAddAction,
+)
+
+internal data class ProxyServerListToolMenuEntry(
+    val title: String,
+    val action: ProxyServerListToolAction,
+)
+
+internal data class ProxyServerListGroupTabUi(
+    val id: Int,
+    val name: String,
+    val serverCount: Int,
+)

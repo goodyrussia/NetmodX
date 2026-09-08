@@ -1,0 +1,147 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8
+
+jobs:
+  build-arm64:
+    name: Build arm64-v8a release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "26"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Go 1.24.0 for Xray-core
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache: false
+
+      - name: Build pinned Xray-core SSH fork
+        env:
+          XRAY_CORE_TAG: v25.5.16-ssh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/goodyrussia/Xray-core.git /tmp/xray-core
+          git -C /tmp/xray-core checkout --detach "$XRAY_CORE_TAG"
+          test "$(git -C /tmp/xray-core rev-list -n1 "$XRAY_CORE_TAG")" = "6c498d292c1c59fd493d0fd2eabcf061d25c025b"
+          mkdir -p app/build/generated/xrayCoreJniLibs/arm64-v8a
+          (
+            cd /tmp/xray-core
+            GOTOOLCHAIN=auto go build -mod=mod -trimpath -ldflags='-s -w -buildid=' -o /tmp/xray-linux ./main
+            /tmp/xray-linux version | grep -F 'Xray 25.5.16'
+            CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
+              -mod=mod -trimpath -ldflags='-s -w -buildid=' \
+              -o "$GITHUB_WORKSPACE/app/build/generated/xrayCoreJniLibs/arm64-v8a/libxray.so" ./main
+          )
+          file app/build/generated/xrayCoreJniLibs/arm64-v8a/libxray.so | grep -E 'ARM aarch64|AArch64'
+          sha256sum app/build/generated/xrayCoreJniLibs/arm64-v8a/libxray.so
+          python3 scripts/validate_eichgee_configs.py /tmp/xray-linux
+
+      - name: Verify simplified runtime policy
+        run: python3 scripts/verify_simplified_policy.py
+
+      - name: Install Android build requirements
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.14206865"
+          # Google has not published platform 37 in the public repository yet;
+          # MIUIX 0.9.2 requires compileSdk 37. Use API 36 platform APIs as the
+          # compile-only shim while retaining targetSdk/compileSdk 37 metadata.
+          cp -a "$ANDROID_HOME/platforms/android-36" "$ANDROID_HOME/platforms/android-37"
+          sed -i 's/^AndroidVersion.ApiLevel=.*/AndroidVersion.ApiLevel=37/' "$ANDROID_HOME/platforms/android-37/source.properties"
+          printf 'ANDROID_NDK_HOME=%s\n' "$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          printf 'ANDROID_NDK_ROOT=%s\n' "$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Prepare release signing key
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.NETMODX_SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$SIGNING_KEYSTORE_BASE64"
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > /tmp/netmodx-release.jks
+          test -s /tmp/netmodx-release.jks
+
+      - name: Build arm64 release APK
+        env:
+          NETMODX_SIGNING_KEYSTORE: /tmp/netmodx-release.jks
+          NETMODX_SIGNING_STORE_PASSWORD: ${{ secrets.NETMODX_SIGNING_STORE_PASSWORD }}
+          NETMODX_SIGNING_KEY_ALIAS: ${{ secrets.NETMODX_SIGNING_KEY_ALIAS }}
+          NETMODX_SIGNING_KEY_PASSWORD: ${{ secrets.NETMODX_SIGNING_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleRelease
+          mkdir -p dist
+          apk=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*arm64-v8a*release*.apk' | head -n 1)
+          test -n "$apk"
+          cp "$apk" dist/NetmodX-arm64-v8a.apk
+
+      - name: Verify APK payload
+        run: |
+          APK="dist/NetmodX-arm64-v8a.apk"
+          test -s "$APK"
+          unzip -tq "$APK"
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libxray.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libsetuidgid.so'
+          BADGING=$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK")
+          grep -F "package: name='com.netmodx.app' versionCode='1' versionName='1.0.0'" <<< "$BADGING"
+          grep -F "native-code: 'arm64-v8a'" <<< "$BADGING"
+          MANIFEST=$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml)
+          ! grep -Ei 'VpnService|BIND_VPN_SERVICE|v2rayng|install-sub|clashmeta|flclashx' <<< "$MANIFEST"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee apk-signing.txt
+          grep -F 'Signer #1 certificate SHA-256 digest: 9C230982939E8BFA9E74EE8FB9A70EA5E2873209FCA61875D9383EA6053F0B8A' apk-signing.txt
+          sha256sum "$APK" | tee apk-sha256.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetmodX-arm64-v8a-${{ github.sha }}
+          path: |
+            dist/NetmodX-arm64-v8a.apk
+            apk-sha256.txt
+            apk-signing.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/NetmodX-arm64-v8a.apk
+            apk-sha256.txt
+            apk-signing.txt
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f /tmp/netmodx-release.jks

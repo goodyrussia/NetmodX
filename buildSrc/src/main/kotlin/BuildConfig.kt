@@ -1,0 +1,63 @@
+// Copyright 2026, AsteriskNG contributors
+// SPDX-License-Identifier: GPL-3.0
+
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
+
+object ProjectConfig {
+    const val JVM_VERSION = 26
+    const val PROJECT_NAME = "NetmodX"
+    const val VERSION_NAME = "1.0.0"
+    const val VERSION_CODE = 1
+    const val PACKAGE_NAME = "com.netmodx.app"
+    const val XRAY_CORE_VERSION = "v25.5.16-ssh"
+    const val XRAY_CORE_COMMIT = "6c498d292c1c59fd493d0fd2eabcf061d25c025b"
+    const val TARGET_SDK = 37
+    const val MIN_SDK = 24
+    // This project targets rooted arm64-v8a Android devices only.
+    val SUPPORTED_ANDROID_ABIS = listOf("arm64-v8a")
+}
+
+
+abstract class GenerateProjectInfoTask : DefaultTask() {
+    @get:Input
+    abstract val packageName: Property<String>
+
+    @get:Input
+    abstract val projectName: Property<String>
+
+    @get:Input
+    abstract val versionName: Property<String>
+
+    @get:Input
+    abstract val versionCode: Property<Int>
+
+    @get:Input
+    abstract val xrayCoreVersion: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val packagePath = packageName.get().replace('.', '/')
+        val file = outputDirectory.file("$packagePath/ProjectInfo.kt").get().asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            """
+            package ${packageName.get()}
+
+            object ProjectInfo {
+                const val PROJECT_NAME = "${projectName.get()}"
+                const val VERSION_NAME = "${versionName.get()}"
+                const val VERSION_CODE = ${versionCode.get()}
+                const val XRAY_CORE_VERSION = "${xrayCoreVersion.get()}"
+            }
+            """.trimIndent(),
+        )
+    }
+}

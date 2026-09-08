@@ -1,0 +1,323 @@
+// Copyright 2026, AsteriskNG contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package features.proxy.server.model
+
+import io.ktor.http.Parameters
+import io.ktor.http.ParametersBuilder
+import io.ktor.http.Url
+import io.ktor.http.parsing.ParseException
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import utils.decodeFlexibleBase64OrNull
+import utils.encodeUrlSafeBase64OptionalPadding
+import utils.toProxyUrlRemarks
+
+object ProxyServerConstants {
+    const val PROTOCOL_SOCKS = "socks"
+    const val PROTOCOL_SOCKS4 = "socks4"
+    const val PROTOCOL_SOCKS5 = "socks5"
+    const val PROTOCOL_SS = "ss"
+    const val PROTOCOL_VMESS = "vmess"
+    const val PROTOCOL_VLESS = "vless"
+    const val PROTOCOL_TROJAN = "trojan"
+    const val PROTOCOL_SSH = "ssh"
+}
+
+@Serializable
+data class ProxyServerInfo(
+    val remarks: String,
+    val address: String,
+    val protocol: String,
+)
+
+interface ProxyServer<T : ProxyServer<T>> {
+    companion object {
+        val json = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
+
+        fun parse(str: String): ProxyServer<*> {
+            val value = str.trim()
+            parseLegacyProxyServerUrl(value)?.let { server ->
+                server.check()
+                return server
+            }
+
+            val url = Url(value)
+            val server = when (url.protocol.name) {
+                ProxyServerConstants.PROTOCOL_SOCKS,
+                ProxyServerConstants.PROTOCOL_SOCKS4,
+                ProxyServerConstants.PROTOCOL_SOCKS5 -> Socks().parse(url)
+                ProxyServerConstants.PROTOCOL_SS -> Shadowsocks().parse(url)
+                ProxyServerConstants.PROTOCOL_VMESS -> {
+                    if (url.user == null) {
+                        val originJson = url.host.decodeProxyUrlBase64().decodeToString()
+                        json.decodeFromString<LegacyVMess>(originJson).convertToAEAD()
+                    } else {
+                        VMess().parse(url)
+                    }
+                }
+
+                ProxyServerConstants.PROTOCOL_VLESS -> VLESS().parse(url)
+                ProxyServerConstants.PROTOCOL_TROJAN -> Trojan().parse(url)
+                ProxyServerConstants.PROTOCOL_SSH -> Ssh().parse(url)
+                else -> {
+                    unsupportedProxyServerUrl(url)
+                }
+            }
+            server.check()
+            return server
+        }
+
+        private fun parseLegacyProxyServerUrl(value: String): ProxyServer<*>? {
+            val scheme = value.substringBefore("://", missingDelimiterValue = "")
+            val payload = value.substringAfter("://", missingDelimiterValue = "")
+            val body = payload.substringBefore("#")
+            if (body.isBlank()) return null
+            return when {
+                scheme.equals(ProxyServerConstants.PROTOCOL_VMESS, ignoreCase = true) &&
+                    !body.contains('@') &&
+                    !body.contains('?') -> {
+                    val originJson = body.decodeProxyUrlBase64().decodeToString()
+                    json.decodeFromString<LegacyVMess>(originJson).convertToAEAD()
+                }
+
+                scheme.equals(ProxyServerConstants.PROTOCOL_SS, ignoreCase = true) &&
+                    !body.contains('@') -> {
+                    val remarks = payload.substringAfter("#", missingDelimiterValue = "").toProxyUrlRemarks()
+                    val decoded = body.decodeProxyUrlBase64().decodeToString()
+                    Shadowsocks().parseLegacy(decoded, remarks)
+                }
+
+                else -> null
+            }
+        }
+    }
+
+    fun getInfo(): ProxyServerInfo
+    fun toXrayOutbound(tag: String): OutboundObject
+    fun update(other: ProxyServer<*>)
+    fun check()
+}
+
+internal fun String.decodeProxyUrlBase64(): ByteArray {
+    return decodeFlexibleBase64OrNull()
+        ?: throw IllegalArgumentException("Bad proxy URL base64")
+}
+
+internal fun ByteArray.encodeProxyUrlBase64(): String {
+    return encodeUrlSafeBase64OptionalPadding()
+}
+
+interface UrlProxyServer<T : UrlProxyServer<T>> : ProxyServer<T> {
+    fun parse(url: Url): T
+    fun getUrl(): String
+}
+
+fun ProxyServer<*>.getUrlOrNull(): String? {
+    return (this as? UrlProxyServer<*>)?.getUrl()
+}
+
+fun ProxyServer<*>.getCopyTextOrNull(): String? {
+    return when (this) {
+        is UrlProxyServer<*> -> getUrl()
+        else -> null
+    }
+}
+
+internal fun proxyServerTypeMismatch(): Nothing {
+    throw IllegalArgumentException("Proxy server type mismatch")
+}
+
+internal fun unsupportedProxyServerUrl(url: Url): Nothing {
+    throw ParseException("Unsupported ProxyServer url protocol: ${url.protocol.name}")
+}
+
+@Serializable
+data class V2RayParameters(
+    // standard
+    var type: String = "raw",
+    var security: String = "none",
+    var allowInsecure: Boolean = false,
+    var path: String? = null,
+    var host: String? = null,
+    var headers: String? = null,
+    var mtu: String? = null,
+    var tti: String? = null,
+    var serviceName: String? = null,
+    var mode: String? = null,
+    var authority: String? = null,
+    var extra: String? = null,
+    var fm: String? = null,
+    var fp: String? = null,
+    var sni: String? = null,
+    var alpn: String? = null,
+    var ech: String? = null,
+    var pcs: String? = null,
+    var vcn: String? = null,
+    var pbk: String? = null,
+    var sid: String? = null,
+    var pqv: String? = null,
+    var spx: String? = null,
+    // v2rayN
+    var headerType: String? = "none",
+) {
+    fun parse(url: Url, defaultType: String, defaultSecurity: String): V2RayParameters {
+        this.type = url.parameters["type"] ?: defaultType
+        this.security = url.parameters["security"] ?: defaultSecurity
+        this.allowInsecure = url.parameters["allowInsecure"].toEnabledFlag() || url.parameters["insecure"].toEnabledFlag()
+        this.fm = url.parameters["fm"]
+        when (this.type) {
+            "tcp", "raw" -> {
+                this.type = "raw"
+                this.headerType = url.parameters["headerType"] ?: "none"
+                this.host = url.parameters["host"]
+            }
+
+            "kcp", "mkcp" -> {
+                this.type = "mkcp"
+                this.mtu = url.parameters["mtu"]
+                this.tti = url.parameters["tti"]
+            }
+
+            "ws", "websocket" -> {
+                this.type = "websocket"
+                this.path = url.parameters["path"]
+                this.host = url.parameters["host"]
+                this.headers = url.parameters["headers"]
+            }
+
+            "httpupgrade" -> {
+                this.path = url.parameters["path"]
+                this.host = url.parameters["host"]
+                this.headers = url.parameters["headers"]
+            }
+
+            "grpc" -> {
+                this.mode = url.parameters["mode"] ?: "gun"
+                this.authority = url.parameters["authority"]
+                this.serviceName = url.parameters["serviceName"]
+            }
+
+            "xhttp", "splithttp" -> {
+                this.type = "xhttp"
+                this.path = url.parameters["path"]
+                this.host = url.parameters["host"]
+                this.mode = url.parameters["mode"]
+                this.extra = url.parameters["extra"]
+            }
+
+            "http", "h2", "h3" -> throw ParseException("Unsupported Xray transport type: ${this.type}")
+            else -> throw ParseException("Unknown v2ray transport type: ${this.type}")
+        }
+        when (this.security) {
+            "none" -> {}
+            "tls" -> {
+                this.fp = url.parameters["fp"]
+                this.sni = url.parameters["sni"]
+                this.alpn = url.parameters["alpn"]
+                this.ech = url.parameters["ech"]
+                this.pcs = url.parameters["pcs"]
+                this.vcn = url.parameters["vcn"]
+            }
+
+            "reality" -> {
+                this.fp = url.parameters["fp"] ?: "chrome"
+                this.sni = url.parameters["sni"]
+                this.pbk = url.parameters["pbk"]
+                this.sid = url.parameters["sid"]
+                this.pqv = url.parameters["pqv"]
+                this.spx = url.parameters["spx"]
+            }
+
+            else -> throw ParseException("Unknown v2ray security type: ${this.security}")
+        }
+        return this
+    }
+
+    fun get(): Parameters {
+        val transportType = type.toV2RayTransportTypeParameter()
+        return ParametersBuilder().apply {
+            appendIfNotBlank("type", transportType)
+            appendIfNotBlank("security", this@V2RayParameters.security)
+            appendIfNotBlank("fm", this@V2RayParameters.fm)
+            when (transportType) {
+                "raw" -> {
+                    appendIfNotBlank("headerType", this@V2RayParameters.headerType)
+                    appendIfNotBlank("host", this@V2RayParameters.host)
+                }
+
+                "kcp", "mkcp" -> {
+                    appendIfNotBlank("mtu", this@V2RayParameters.mtu)
+                    appendIfNotBlank("tti", this@V2RayParameters.tti)
+                }
+
+                "ws", "websocket", "httpupgrade" -> {
+                    appendIfNotBlank("path", this@V2RayParameters.path)
+                    appendIfNotBlank("host", this@V2RayParameters.host)
+                    appendIfNotBlank("headers", this@V2RayParameters.headers)
+                }
+
+                "grpc" -> {
+                    appendIfNotBlank("mode", this@V2RayParameters.mode)
+                    appendIfNotBlank("authority", this@V2RayParameters.authority)
+                    appendIfNotBlank("serviceName", this@V2RayParameters.serviceName)
+                }
+
+                "xhttp", "splithttp" -> {
+                    appendIfNotBlank("path", this@V2RayParameters.path)
+                    appendIfNotBlank("host", this@V2RayParameters.host)
+                    appendIfNotBlank("mode", this@V2RayParameters.mode)
+                    appendIfNotBlank("extra", this@V2RayParameters.extra)
+                }
+
+                else -> throw ParseException("Unknown v2ray transport type: $type")
+            }
+            when (security) {
+                "none" -> {}
+                "tls" -> {
+                    if (this@V2RayParameters.allowInsecure) {
+                        append("allowInsecure", "1")
+                    }
+                    appendIfNotBlank("fp", this@V2RayParameters.fp)
+                    appendIfNotBlank("sni", this@V2RayParameters.sni)
+                    appendIfNotBlank("alpn", this@V2RayParameters.alpn)
+                    appendIfNotBlank("ech", this@V2RayParameters.ech)
+                    appendIfNotBlank("pcs", this@V2RayParameters.pcs)
+                    appendIfNotBlank("vcn", this@V2RayParameters.vcn)
+                }
+
+                "reality" -> {
+                    appendIfNotBlank("fp", this@V2RayParameters.fp)
+                    appendIfNotBlank("sni", this@V2RayParameters.sni)
+                    appendIfNotBlank("pbk", this@V2RayParameters.pbk)
+                    appendIfNotBlank("sid", this@V2RayParameters.sid)
+                    appendIfNotBlank("pqv", this@V2RayParameters.pqv)
+                    appendIfNotBlank("spx", this@V2RayParameters.spx)
+                }
+
+                else -> throw ParseException("Unknown v2ray security type: $security")
+            }
+        }.build()
+    }
+}
+
+private fun String.toV2RayTransportTypeParameter(): String {
+    return when (val transportType = ifBlank { "raw" }) {
+        "tcp" -> "raw"
+        else -> transportType
+    }
+}
+
+private fun ParametersBuilder.appendIfNotBlank(name: String, value: String?) {
+    value?.takeIf(String::isNotBlank)?.let { append(name, it) }
+}
+
+private fun String?.toEnabledFlag(): Boolean {
+    return when (this?.trim()?.lowercase()) {
+        "1", "true", "yes", "on" -> true
+        else -> false
+    }
+}
