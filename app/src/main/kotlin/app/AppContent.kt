@@ -77,7 +77,7 @@ import top.yukonga.miuix.kmp.basic.NavigationRailDisplayMode
 import top.yukonga.miuix.kmp.basic.NavigationRailItem
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.AppRecording
+import top.yukonga.miuix.kmp.icon.extended.File
 import top.yukonga.miuix.kmp.icon.extended.Layers
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.theme.MiuixTheme
