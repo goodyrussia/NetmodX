@@ -118,7 +118,7 @@ jobs:
           MANIFEST=$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml)
           ! grep -Ei 'VpnService|BIND_VPN_SERVICE|v2rayng|install-sub|clashmeta|flclashx' <<< "$MANIFEST"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee apk-signing.txt
-          grep -F 'Signer #1 certificate SHA-256 digest: 9C230982939E8BFA9E74EE8FB9A70EA5E2873209FCA61875D9383EA6053F0B8A' apk-signing.txt
+          grep -Fi 'Signer #1 certificate SHA-256 digest: 9c230982939e8bfa9e74ee8fb9a70ea5e2873209fca61875d9383ea6053f0b8a' apk-signing.txt
           sha256sum "$APK" | tee apk-sha256.txt
 
       - name: Upload build artifact
